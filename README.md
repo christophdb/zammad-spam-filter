@@ -1,25 +1,27 @@
-# Zammad Spam-Filter
+# Zammad Spam Filter
 
-Kleiner Webhook-Dienst für [Zammad](https://zammad.org): Markiert ein Agent ein Ticket als Spam, legt der Dienst automatisch einen **Postmaster-Filter** für den Absender an. Künftige Mails dieses Absenders landen dann direkt **geschlossen in der Gruppe `zz_Spam`** mit dem Tag `Spam-Auto` – sie tauchen nicht mehr in den normalen Übersichten auf, bleiben aber auffindbar.
+🇩🇪 [Deutsche Version](README.de.md)
 
-Mails werden bewusst **nicht** verworfen (`x-zammad-ignore`). Ein Fehlklick auf „Spam“ würde sonst alle künftigen Mails eines legitimen Absenders stillschweigend löschen, ohne dass es jemand bemerkt.
+A small webhook service for [Zammad](https://zammad.org): when an agent marks a ticket as spam, the service automatically creates a **postmaster filter** for the sender. Future mails from that sender land **closed in the group `zz_Spam`** with the tag `Spam-Auto` – out of the regular overviews, but still searchable.
 
-## Ablauf
+Mails are deliberately **not** discarded (`x-zammad-ignore`). Otherwise, a single misclick on "spam" would silently drop all future mail from a legitimate sender without anyone noticing.
+
+## How it works
 
 ```
-Agent wendet Makro "Close & Tag as Spam" an
-  → Ticket: Gruppe zz_Spam, Tag Spam, geschlossen
-  → Trigger "Spamlist" feuert (einmal)
-  → Webhook POST http://zammad-spam-filter:8484/zammad-spam
-  → Dienst legt Postmaster-Filter "Spam-Block: <absender>" an
+Agent applies macro "Close & Tag as Spam"
+  → ticket: group zz_Spam, tag Spam, closed
+  → trigger "Spamlist" fires (once)
+  → webhook POST http://zammad-spam-filter:8484/zammad-spam
+  → service creates postmaster filter "Spam-Block: <sender>"
 
-Neue Mail vom selben Absender
-  → Postmaster-Filter greift
-  → neues Ticket: Gruppe zz_Spam, geschlossen, Tag Spam-Auto
-  → Trigger feuert NICHT (Tag ist Spam-Auto, nicht Spam)
+New mail from the same sender
+  → postmaster filter matches
+  → new ticket: group zz_Spam, closed, tag Spam-Auto
+  → trigger does NOT fire (tag is Spam-Auto, not Spam)
 ```
 
-Der angelegte Filter sieht so aus:
+The created filter looks like this:
 
 ```json
 {
@@ -35,165 +37,165 @@ Der angelegte Filter sieht so aus:
 }
 ```
 
-Existiert bereits ein Filter mit diesem Namen, legt der Dienst keinen zweiten an.
+If a filter with that name already exists, the service does not create a second one.
 
-## Einrichtung in Zammad
+## Setup in Zammad
 
-Die Schritte am besten in dieser Reihenfolge durchgehen – der Webhook (Schritt 5) setzt voraus, dass der Container bereits läuft.
+Follow the steps in this order – the webhook (step 5) requires the container to be running already. The screenshots show the German Zammad UI.
 
-### 1. Gruppe `zz_Spam` anlegen
+### 1. Create the group `zz_Spam`
 
-*Verwalten → Gruppen → Neue Gruppe*
+*Admin → Groups → New Group*
 
-- **Name:** `zz_Spam` (das `zz_` sortiert die Gruppe in Listen ans Ende)
-- **Zugriff:** Nur die Agenten, die Spam gelegentlich sichten sollen. Die anderen sehen die Tickets dann gar nicht.
+- **Name:** `zz_Spam` (the `zz_` prefix sorts the group to the end of lists)
+- **Access:** only the agents who should review spam occasionally. Everyone else won't see these tickets at all.
 
-Tipp: Agenten mit Zugriff sollten in ihren Profil-Benachrichtigungen die Gruppe `zz_Spam` abwählen, damit sie für automatisch einsortierten Spam keine Mails bekommen.
+Tip: agents with access should deselect the group `zz_Spam` in their notification settings so they don't get emails for automatically sorted spam.
 
-### 2. Tags `Spam` und `Spam-Auto` anlegen
+### 2. Create the tags `Spam` and `Spam-Auto`
 
-*Verwalten → Tags*
+*Admin → Tags*
 
-Beide Tags anlegen, falls nur Admins neue Tags erstellen dürfen:
+Create both tags if only admins are allowed to create new tags:
 
-| Tag | gesetzt von | Bedeutung |
+| Tag | set by | meaning |
 |---|---|---|
-| `Spam` | Makro (manuell durch Agent) | löst den Webhook aus |
-| `Spam-Auto` | Postmaster-Filter (automatisch) | löst **nichts** aus |
+| `Spam` | macro (manually by an agent) | triggers the webhook |
+| `Spam-Auto` | postmaster filter (automatically) | triggers **nothing** |
 
-Die Trennung ist wichtig: Würde der Filter ebenfalls `Spam` setzen, würde jede geblockte Mail erneut den Webhook aufrufen.
+The separation matters: if the filter also set `Spam`, every blocked mail would call the webhook again.
 
-### 3. API-Token erstellen
+### 3. Create an API token
 
-Empfohlen ist ein eigener technischer Benutzer (z. B. `spamfilter@…`) mit einer eigenen Rolle, die nur diese Berechtigungen hat:
+We recommend a dedicated technical user (e.g. `spamfilter@…`) with its own role that has only these permissions:
 
-- `admin.channel_email` – zum Lesen und Anlegen von Postmaster-Filtern
-- `user_preferences.access_token` – damit der Benutzer sich einen Token erzeugen kann
+- `admin.channel_email` – to read and create postmaster filters
+- `user_preferences.access_token` – so the user can create a token
 
-Als dieser Benutzer anmelden, dann *Profil → Token-Zugriff → Neuen Token erstellen*, Berechtigung **`admin.channel_email`** auswählen. Den Token in die `.env` als `ZAMMAD_SPAMFILTER_API_TOKEN` eintragen.
+Log in as that user, go to *Profile → Token Access → Create*, and select the permission **`admin.channel_email`**. Put the token into `.env` as `ZAMMAD_SPAMFILTER_API_TOKEN`.
 
-Der Token braucht **keine** Rechte auf Gruppen oder Ticket-Status – deshalb werden deren IDs per Umgebungsvariable übergeben (nächster Schritt).
+The token does **not** need access to groups or ticket states – that's why their IDs are passed via environment variables (next step).
 
-### 4. IDs von Gruppe und Status ermitteln
+### 4. Look up the group and state IDs
 
-Auf dem Zammad-Server:
+On the Zammad server:
 
 ```bash
 docker compose exec zammad-railsserver bundle exec rails r \
-  'puts "Gruppe: #{Group.find_by(name: "zz_Spam").id}"; puts "Status: #{Ticket::State.find_by(name: "closed").id}"'
+  'puts "Group: #{Group.find_by(name: "zz_Spam").id}"; puts "State: #{Ticket::State.find_by(name: "closed").id}"'
 ```
 
-Die Werte als `ZAMMAD_SPAMFILTER_GROUP_ID` und `ZAMMAD_SPAMFILTER_STATE_ID` in die `.env` eintragen. Der Status `closed` hat in einer Standard-Installation die ID `4`.
+Put the values into `.env` as `ZAMMAD_SPAMFILTER_GROUP_ID` and `ZAMMAD_SPAMFILTER_STATE_ID`. In a default installation, the state `closed` has ID `4`.
 
-Danach den Container starten (siehe [Installation](#installation)).
+Then start the container (see [Installation](#installation)).
 
-### 5. Webhook anlegen
+### 5. Create the webhook
 
-*Verwalten → Webhook → Neuer Webhook*
+*Admin → Webhook → New Webhook*
 
-| Feld | Wert |
+| Field | Value |
 |---|---|
 | Name | `Spam-Filter Webhook` |
-| Endpunkt | `http://zammad-spam-filter:8484/zammad-spam` |
-| Request-Methode | `POST` |
-| SSL-Verifizierung | nein (interne HTTP-Verbindung im Docker-Netz) |
-| Authentifizierung | optional *Bearer Token* – dann denselben Wert als `ZAMMAD_SPAMFILTER_WEBHOOK_TOKEN` in die `.env` |
-| Eigene Nutzlast | **aus** |
+| Endpoint | `http://zammad-spam-filter:8484/zammad-spam` |
+| Request method | `POST` |
+| SSL verification | no (internal HTTP connection inside the Docker network) |
+| Authentication | optional *Bearer token* – then put the same value into `.env` as `ZAMMAD_SPAMFILTER_WEBHOOK_TOKEN` |
+| Custom payload | **off** |
 
-Der Dienst liest aus der Standard-Nutzlast `ticket.customer.email`. Mit eigener Nutzlast muss dieses Feld erhalten bleiben.
+The service reads `ticket.customer.email` from the default payload. If you use a custom payload, keep that field.
 
-### 6. Makro „Close & Tag as Spam“ anlegen
+### 6. Create the macro "Close & Tag as Spam"
 
-*Verwalten → Makros → Neues Makro*
+*Admin → Macros → New Macro*
 
-| Aktion | Wert |
+| Action | Value |
 |---|---|
-| Status | geschlossen |
-| Tags | hinzufügen: `Spam` |
-| Besitzer | aktueller Benutzer |
-| Gruppe | `zz_Spam` |
+| State | closed |
+| Tags | add: `Spam` |
+| Owner | current user |
+| Group | `zz_Spam` |
 
-Mit diesem Makro markieren Agenten ein Ticket als Spam.
+Agents use this macro to mark a ticket as spam.
 
-![Makro „Close & Tag as Spam“](docs/makro-close-tag-spam.png)
+![Macro "Close & Tag as Spam"](docs/makro-close-tag-spam.png)
 
-### 7. Trigger „Spamlist“ anlegen
+### 7. Create the trigger "Spamlist"
 
-*Verwalten → Trigger → Neuer Trigger*
+*Admin → Triggers → New Trigger*
 
-| Feld | Wert |
+| Field | Value |
 |---|---|
 | Name | `Spamlist` |
-| Aktiviert durch | Aktion |
-| Aktions-Ausführung | **Selektiv** |
-| Bedingung 1 | Gruppe **ist** `zz_Spam` |
-| Bedingung 2 | Tags **enthält eins** `Spam` |
-| Aktion 1 | Status: geschlossen |
-| Aktion 2 | Webhook: `Spam-Filter Webhook` |
+| Activated by | Action |
+| Action execution | **Selective** |
+| Condition 1 | Group **is** `zz_Spam` |
+| Condition 2 | Tags **contains one** `Spam` |
+| Action 1 | State: closed |
+| Action 2 | Webhook: `Spam-Filter Webhook` |
 
-![Trigger „Spamlist“](docs/trigger-spamlist.png)
+![Trigger "Spamlist"](docs/trigger-spamlist.png)
 
-**Warum genau so?**
+**Why exactly like this?**
 
-- **Selektiv statt Immer:** Mit „Immer“ feuert der Trigger bei *jeder* Änderung an einem Spam-Ticket (Notiz, Besitzerwechsel, Merge …) und ruft den Webhook immer wieder auf.
-- **Bedingung auf die Gruppe:** Bei „Selektiv“ prüft Zammad, ob sich ein Feld aus der Bedingung geändert hat. **Tags zählen dabei nicht als geändertes Feld** – ein Trigger mit nur einer Tag-Bedingung feuert im Modus „Selektiv“ nie. Die Gruppe dagegen ist ein Ticket-Feld; das Makro verschiebt nach `zz_Spam`, dadurch feuert der Trigger genau einmal.
+- **Selective instead of Always:** with "Always", the trigger fires on *every* change to a spam ticket (note, owner change, merge …) and calls the webhook again and again.
+- **Condition on the group:** in "Selective" mode, Zammad checks whether a field from the conditions has changed. **Tags do not count as a changed field** – a trigger with only a tag condition never fires in "Selective" mode. The group, however, is a ticket field; the macro moves the ticket to `zz_Spam`, so the trigger fires exactly once.
 
 ## Installation
 
-Der Container muss im **selben Docker-Netz wie Zammad** laufen, damit Zammad den Webhook unter `http://zammad-spam-filter:8484` erreicht. Ein Port nach außen ist nicht nötig.
+The container must run in the **same Docker network as Zammad** so that Zammad can reach the webhook at `http://zammad-spam-filter:8484`. No public port is needed.
 
 ```bash
-git clone <repo-url> zammad-spam-filter
+git clone https://github.com/christophdb/zammad-spam-filter.git
 cd zammad-spam-filter
 cp .env.example .env
-# .env ausfüllen (siehe Schritte 3 und 4 oben)
+# fill in .env (see steps 3 and 4 above)
 
-docker compose config            # prüfen: alle Variablen gefüllt?
+docker compose config            # check: are all variables set?
 docker compose up -d --build
 docker compose logs -f
 ```
 
-Soll der Dienst stattdessen in einer bestehenden `docker-compose.yml` neben Zammad laufen, den Service-Block übernehmen und `build:` auf das Verzeichnis dieses Repos zeigen lassen.
+To run the service in an existing `docker-compose.yml` next to Zammad instead, copy the service block and point `build:` to the directory of this repository.
 
-### Umgebungsvariablen
+### Environment variables
 
-| Variable in `.env` | Pflicht | Bedeutung |
+| Variable in `.env` | Required | Meaning |
 |---|---|---|
-| `ZAMMAD_URL` | ja | Hostname von Zammad, **ohne** `https://` |
-| `ZAMMAD_NETWORK` | ja | Docker-Netz, in dem Zammad läuft |
-| `ZAMMAD_SPAMFILTER_API_TOKEN` | ja | API-Token mit `admin.channel_email` |
-| `ZAMMAD_SPAMFILTER_GROUP_ID` | ja | ID der Gruppe `zz_Spam` |
-| `ZAMMAD_SPAMFILTER_STATE_ID` | ja | ID des Status `closed` |
-| `ZAMMAD_SPAMFILTER_WEBHOOK_TOKEN` | nein | Bearer-Token des Webhooks; leer = keine Prüfung |
+| `ZAMMAD_URL` | yes | Zammad hostname, **without** `https://` |
+| `ZAMMAD_NETWORK` | yes | Docker network Zammad runs in |
+| `ZAMMAD_SPAMFILTER_API_TOKEN` | yes | API token with `admin.channel_email` |
+| `ZAMMAD_SPAMFILTER_GROUP_ID` | yes | ID of the group `zz_Spam` |
+| `ZAMMAD_SPAMFILTER_STATE_ID` | yes | ID of the state `closed` |
+| `ZAMMAD_SPAMFILTER_WEBHOOK_TOKEN` | no | bearer token of the webhook; empty = no check |
 
-Im Container heißen die Variablen kürzer (`ZAMMAD_TOKEN`, `SPAM_GROUP_ID`, …), siehe `docker-compose.yml`. Zusätzlich kann dort `SPAM_TAG` gesetzt werden (Standard: `Spam-Auto`).
+Inside the container the variables have shorter names (`ZAMMAD_TOKEN`, `SPAM_GROUP_ID`, …), see `docker-compose.yml`. You can also set `SPAM_TAG` there (default: `Spam-Auto`).
 
 ### Test
 
-1. Von einer eigenen Test-Adresse eine Mail an Zammad schicken.
-2. Auf das Ticket das Makro „Close & Tag as Spam“ anwenden.
-3. `docker compose logs zammad-spam-filter` zeigt `Neu geblockt: <adresse>`.
-4. Eine zweite Mail von derselben Adresse schicken → neues Ticket, geschlossen, Gruppe `zz_Spam`, Tag `Spam-Auto`. Im Log erscheint **kein** neuer Aufruf.
-5. Test-Filter wieder löschen (siehe unten).
+1. Send a mail to Zammad from a test address of your own.
+2. Apply the macro "Close & Tag as Spam" to the ticket.
+3. `docker compose logs zammad-spam-filter` shows `Neu geblockt: <address>`.
+4. Send a second mail from the same address → new ticket, closed, group `zz_Spam`, tag `Spam-Auto`. **No** new call appears in the log.
+5. Delete the test filter again (see below).
 
-## Betrieb
+## Operation
 
-### Fehlklick rückgängig machen
+### Undo a misclick
 
-Ein legitimer Absender wurde als Spam markiert:
+A legitimate sender was marked as spam:
 
 ```bash
 docker compose exec zammad-railsserver bundle exec rails r \
-  'PostmasterFilter.where(name: "Spam-Block: absender@example.com").destroy_all'
+  'PostmasterFilter.where(name: "Spam-Block: sender@example.com").destroy_all'
 ```
 
-Anschließend die betroffenen Tickets in `zz_Spam` (Tag `Spam-Auto`) in die richtige Gruppe verschieben, wieder öffnen und die Tags entfernen.
+Then move the affected tickets in `zz_Spam` (tag `Spam-Auto`) to the right group, reopen them and remove the tags.
 
-Regelmäßig einen Blick auf Tickets mit dem Tag `Spam-Auto` werfen – legitime Absender dort sind Fehlklicks.
+Check tickets with the tag `Spam-Auto` regularly – legitimate senders there are misclicks.
 
-### Filter suchen
+### Find filters
 
-**Die Filterliste in der Zammad-Oberfläche zeigt maximal 500 Filter an** – und zwar die ältesten (siehe [Bekannte Zammad-Eigenheiten](#bekannte-zammad-eigenheiten)). Filter deshalb per Rails-Konsole suchen:
+**The filter list in the Zammad UI shows at most 500 filters** – the oldest ones (see [Known Zammad quirks](#known-zammad-quirks)). Search filters via the Rails console instead:
 
 ```bash
 docker compose exec zammad-railsserver bundle exec rails r '
@@ -202,33 +204,33 @@ PostmasterFilter.select { |f| f.match.to_s.include?("example.com") }
 '
 ```
 
-Anzahl und Duplikate:
+Count and duplicates:
 
 ```bash
 docker compose exec zammad-railsserver bundle exec rails r '
-puts "Gesamt:  #{PostmasterFilter.count}"
-puts "Doppelt: #{PostmasterFilter.group(:name).having("count(*) > 1").count.inspect}"
+puts "Total:      #{PostmasterFilter.count}"
+puts "Duplicates: #{PostmasterFilter.group(:name).having("count(*) > 1").count.inspect}"
 '
 ```
 
-### Nachvollziehen, was mit einer Mail passiert ist
+### Trace what happened to a mail
 
 ```bash
-docker compose logs --since 24h zammad-scheduler | grep -i -A5 "<message-id oder absender>"
+docker compose logs --since 24h zammad-scheduler | grep -i -A5 "<message-id or sender>"
 ```
 
-Das Log zeigt, welcher Filter gegriffen hat (`matching: key 'from' contains '…'`).
+The log shows which filter matched (`matching: key 'from' contains '…'`).
 
-## Bekannte Zammad-Eigenheiten
+## Known Zammad quirks
 
-- **500er-Limit der Filterliste:** Die Admin-Oberfläche lädt Postmaster-Filter über `GET /api/v1/postmaster_filters` ohne `per_page`. Der Server liefert dann nur 500 Einträge nach ID (`paginate_with(default: 500)` in `app/controllers/application_controller/renders_models.rb`). Neuere Filter sind in der UI unsichtbar, **wirken aber trotzdem** – die Mailverarbeitung liest alle Filter direkt aus der Datenbank. Der Dienst selbst ruft alle Seiten ab.
-- **Selektive Trigger ignorieren Tag-Änderungen:** siehe Schritt 7.
-- **IMAP-Abruf löscht Mails:** Ohne „Nachrichten auf dem Server behalten“ löscht Zammad jede abgeholte Mail vom Mailserver – auch dann, wenn daraus kein Ticket entsteht.
-- **`rails` im Docker-Image:** nicht im `PATH`, immer `bundle exec rails …` verwenden.
+- **500-entry limit of the filter list:** the admin UI loads postmaster filters via `GET /api/v1/postmaster_filters` without `per_page`. The server then returns only 500 entries ordered by ID (`paginate_with(default: 500)` in `app/controllers/application_controller/renders_models.rb`). Newer filters are invisible in the UI but **still active** – mail processing reads all filters directly from the database. This service fetches all pages. Reported as [zammad/zammad#6404](https://github.com/zammad/zammad/issues/6404).
+- **Selective triggers ignore tag changes:** see step 7.
+- **IMAP fetching deletes mails:** without "keep messages on server", Zammad deletes every fetched mail from the mail server – even if no ticket is created from it.
+- **`rails` in the Docker image:** not in `PATH`, always use `bundle exec rails …`.
 
-## Umstieg von `x-zammad-ignore`
+## Migrating from `x-zammad-ignore`
 
-Ältere Versionen dieses Dienstes haben Filter mit `x-zammad-ignore` angelegt, die Mails komplett verwerfen. Bestehende Filter lassen sich einmalig umstellen. Erst mit `DRY = true` prüfen, dann mit `DRY = false` ausführen; Gruppen- und Status-ID anpassen:
+Older versions of this service created filters with `x-zammad-ignore`, which discard mails entirely. Existing filters can be converted once. Check with `DRY = true` first, then run with `DRY = false`; adjust the group and state IDs:
 
 ```bash
 docker compose exec zammad-railsserver bundle exec rails r '
@@ -241,20 +243,20 @@ NEW_PERFORM = {
 spam  = PostmasterFilter.where("name LIKE ?", "Spam-Block:%").order(:id).to_a
 dupes = spam.group_by { |f| [f.name, f.match] }.values.flat_map { |fs| fs.drop(1) }
 conv  = (spam - dupes).select { |f| f.perform.key?("x-zammad-ignore") }
-puts "Duplikate löschen: #{dupes.size}"
-puts "Umstellen:         #{conv.size}"
+puts "Delete duplicates: #{dupes.size}"
+puts "Convert:           #{conv.size}"
 unless DRY
   PostmasterFilter.transaction do
     dupes.each(&:destroy)
     conv.each { |f| f.update!(perform: NEW_PERFORM) }
   end
-  puts "Fertig. Gesamt: #{PostmasterFilter.count}"
+  puts "Done. Total: #{PostmasterFilter.count}"
 end
 '
 ```
 
-## Sicherheit
+## Security
 
-- Der Dienst ist nur im Docker-Netz erreichbar (kein veröffentlichter Port).
-- Mit gesetztem `ZAMMAD_SPAMFILTER_WEBHOOK_TOKEN` werden Aufrufe ohne passenden Bearer-Token mit `401` abgelehnt. Ohne Token kann jeder Container im selben Netz Absender blocken lassen.
-- Die HMAC-Signatur des Webhooks wird nicht geprüft.
+- The service is only reachable inside the Docker network (no published port).
+- If `ZAMMAD_SPAMFILTER_WEBHOOK_TOKEN` is set, calls without a matching bearer token are rejected with `401`. Without a token, any container in the same network can have senders blocked.
+- The webhook's HMAC signature is not verified.
