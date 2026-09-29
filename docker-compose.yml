@@ -1,0 +1,22 @@
+---
+services:
+  zammad-spam-filter:
+    build: .
+    container_name: zammad-spam-filter
+    image: zammad-spam-filter
+    restart: unless-stopped
+    environment:
+      - ZAMMAD_URL=https://${ZAMMAD_URL}
+      - ZAMMAD_TOKEN=${ZAMMAD_SPAMFILTER_API_TOKEN}
+      - SPAM_GROUP_ID=${ZAMMAD_SPAMFILTER_GROUP_ID}
+      - SPAM_STATE_ID=${ZAMMAD_SPAMFILTER_STATE_ID}
+      - WEBHOOK_TOKEN=${ZAMMAD_SPAMFILTER_WEBHOOK_TOKEN:-}
+    networks:
+      - zammad
+
+# Der Container muss im selben Docker-Netz wie Zammad haengen,
+# damit Zammad den Webhook unter http://zammad-spam-filter:8484 erreicht.
+networks:
+  zammad:
+    name: ${ZAMMAD_NETWORK}
+    external: true
